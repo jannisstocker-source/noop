@@ -12,8 +12,16 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - name: Install SQLite headers (GRDB)
-        run: apt-get update -q && apt-get install -y -q libsqlite3-dev
+      # GRDB links the WAL snapshot API, which Ubuntu's libsqlite3 is built without; build SQLite with
+      # SQLITE_ENABLE_SNAPSHOT over the distro library.
+      - name: Build SQLite with snapshot support (GRDB)
+        run: |
+          apt-get update -q && apt-get install -y -q libsqlite3-dev curl build-essential
+          curl -fsSL https://www.sqlite.org/2024/sqlite-autoconf-3460100.tar.gz | tar xz
+          cd sqlite-autoconf-3460100
+          CFLAGS="-O2 -DSQLITE_ENABLE_SNAPSHOT=1" ./configure --prefix=/usr --libdir=/usr/lib/$(gcc -dumpmachine) --disable-static
+          make -j"$(nproc)" install
+          ldconfig
       - name: swift test
         working-directory: Packages/StrandAnalytics
         shell: bash
