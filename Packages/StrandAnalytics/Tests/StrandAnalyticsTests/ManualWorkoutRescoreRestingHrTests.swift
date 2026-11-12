@@ -21,14 +21,15 @@ final class ManualWorkoutRescoreRestingHrTests: XCTestCase {
         (0..<120).map { HRSample(ts: $0 * 30, bpm: 148) }
     }
 
-    /// A measured resting of 45 must score the same window strictly higher than the default 60:
-    /// 148 bpm is 71.0% of a 45-resting reserve (zone 3) but 67.7% of a 60-resting one (zone 2).
-    func testMeasuredRestingScoresHigherThanTheDefaultForAFitWearer() {
+    /// Fork change: workouts read Edwards zones off %HRmax, so the resting HR no longer moves a workout's
+    /// zone. 148 bpm is 77.9% of HRmax 190 (zone 3) whatever the resting, and both score the same.
+    /// (Upstream asserted measured > default: 71.0% of a 45-resting reserve vs 67.7% of a 60-resting one.)
+    func testMeasuredRestingDoesNotMoveAWorkoutScoredOnHRmax() {
         let def = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile, hrMax: hrMax)
         let measured = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile,
                                                    hrMax: hrMax, restingHR: 45)
         XCTAssertNotNil(def?.strain); XCTAssertNotNil(measured?.strain)
-        XCTAssertGreaterThan(measured!.strain!, def!.strain!)
+        XCTAssertEqual(measured!.strain!, def!.strain!)
     }
 
     /// nil keeps the old behaviour byte-for-byte — the cold-start path with no measured resting yet.
