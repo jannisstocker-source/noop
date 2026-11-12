@@ -330,7 +330,7 @@ public enum WorkoutDetector {
         for z in 0...5 { zoneCounts[z] = 0 }
         var hrrVals: [Double] = []
         for r in hrSeries {
-            let z = StrainScorer.zoneWeight(r.bpm, restingHR: restingHR, hrReserve: hrReserve)
+            let z = StrainScorer.zoneWeight(r.bpm, restingHR: restingHR, hrReserve: hrReserve, basis: .hrMax)
             zoneCounts[z, default: 0] += 1
             hrrVals.append(StrainScorer.pctHRR(r.bpm, restingHR: restingHR, hrReserve: hrReserve))
         }
@@ -549,7 +549,8 @@ public enum WorkoutDetector {
             let avg = bpms.reduce(0, +) / Double(bpms.count)
             let peak = Int(bpms.max()!.rounded())
             let strain = StrainScorer.strain(hrSamples, maxHR: effMaxHR, restingHR: restHR,
-                                             method: effortMethod, sex: profile?.sex ?? "male")
+                                             method: effortMethod, sex: profile?.sex ?? "male",
+                                             zoneBasis: .hrMax)  // fork: workouts read Edwards zones off %HRmax
 
             sessions.append(ExerciseSession(
                 start: effStart, end: end, avgHR: avg, peakHR: peak, strain: strain,

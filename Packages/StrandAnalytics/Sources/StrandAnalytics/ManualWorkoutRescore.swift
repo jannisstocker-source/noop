@@ -57,7 +57,8 @@ public enum ManualWorkoutRescore {
         let peak = bpms.max() ?? 0
         let strain = StrainScorer.strain(windowSamples, maxHR: hrMax,
                                          restingHR: restingHR ?? StrainScorer.defaultRestingHR,
-                                         method: effortMethod, sex: profile.sex)
+                                         method: effortMethod, sex: profile.sex,
+                                         zoneBasis: .hrMax)  // fork: workouts read Edwards zones off %HRmax
         let kcalRaw = Calories.estimateBoutCalories(windowSamples, profile: profile,
                                                     hrmax: hrMax, restingHR: restingHR).0
         return Scored(avgHr: avg, maxHr: peak, strain: strain, kcal: kcalRaw > 0 ? kcalRaw : nil)

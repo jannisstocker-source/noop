@@ -18,11 +18,12 @@ import WhoopProtocol
 //   2. Per-sample intensity as %HRR = (HR − RHR) / HRR × 100, clamped 0..100.
 //   3. TRIMP accumulated over the window:
 //        a. Edwards 5-zone summation (default): sample contributes its zone weight
-//           (1..5 at 50/60/70/80/90 %HRmax cut-offs) × duration.
-//           Fork change: upstream reads these cut-offs off %HRR (#2835). That leaves strength
-//           training, which sits around 55–70 %HRmax, almost entirely below zone 1, so a normal gym
-//           session scored ~5–25 of 100. This fork uses Edwards' own %HRmax zones instead, which
-//           lifts strength sessions while moving cardio sessions only a few points.
+//           (1..5 at 50/60/70/80/90 cut-offs) × duration.
+//           Fork change: the cut-offs are read off %HRR (#2835) for the all-day number, as upstream,
+//           but off %HRmax (Edwards' own definition) for workouts (`ZoneBasis.hrMax`). Under %HRR a
+//           strength session, which sits around 55–70 %HRmax, is almost entirely below zone 1 and
+//           scored ~5–25 of 100. Applied to the whole day, %HRmax would score a quiet day with HR
+//           around 100 at ~55, so the day keeps %HRR.
 //        b. Banister exponential: sample contributes duration × x × 0.64 × e^(b·x).
 //   4. Logarithmic compression onto [0, 100]:
 //        strain = 100 × ln(TRIMP + 1) / ln(D)
@@ -250,15 +251,27 @@ public enum StrainScorer {
         return pct
     }
 
-    /// Edwards 5-zone weight (0–5) from %HRmax, as Edwards (1993) defines it.
+    /// What the Edwards cut-offs are read against.
     ///
-    /// Fork change: the upstream cut-offs read %HRR, which puts zone 1 at ~121 bpm for RHR 49 /
-    /// HRmax 193, so a strength session averaging ~108 bpm scored almost no TRIMP. HRmax is
-    /// recovered as `restingHR + hrReserve`, so every caller keeps its signature.
-    static func zoneWeight(_ bpm: Double, restingHR: Double, hrReserve: Double) -> Int {
-        let hrMax = restingHR + hrReserve
-        guard hrMax > 0 else { return 0 }
-        let pct = bpm / hrMax * 100.0
+    /// Fork change. `.hrr` is upstream's reading and stays the default, so the all-day Effort number is
+    /// untouched (a quiet day with HR around 100 must keep scoring ~0). `.hrMax` is Edwards' own
+    /// definition and is used for workouts only: a strength session sits around 105–110 bpm, which is
+    /// below the 50 %HRR floor (~121 bpm at RHR 49 / HRmax 193) and so scored almost nothing.
+    public enum ZoneBasis: Sendable, Hashable { case hrr, hrMax }
+
+    /// Edwards 5-zone weight (0–5) from %HRR (unclamped; extremes agree with the clamped path at both
+    /// ends), or from %HRmax when `basis` is `.hrMax` (HRmax recovered as `restingHR + hrReserve`).
+    static func zoneWeight(_ bpm: Double, restingHR: Double, hrReserve: Double,
+                           basis: ZoneBasis = .hrr) -> Int {
+        let pct: Double
+        switch basis {
+        case .hrr:
+            pct = (bpm - restingHR) / hrReserve * 100.0
+        case .hrMax:
+            let hrMax = restingHR + hrReserve
+            guard hrMax > 0 else { return 0 }
+            pct = bpm / hrMax * 100.0
+        }
         for (threshold, weight) in edwardsZones where pct >= threshold { return weight }
         return 0
     }
@@ -333,11 +346,11 @@ public enum StrainScorer {
     }
 
     static func edwardsTRIMP(_ hr: [HRSample], restingHR: Double, hrReserve: Double,
-                             durations: [Double]) -> Double {
+                             durations: [Double], basis: ZoneBasis = .hrr) -> Double {
         var acc = 0.0
         for i in hr.indices {
-            acc += Double(zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve))
-                * durations[i]
+            acc += Double(zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve,
+                                     basis: basis)) * durations[i]
         }
         return acc
     }
@@ -361,10 +374,11 @@ public enum StrainScorer {
     ///
     /// Byte-identical to the Kotlin twin `StrainScorer.zoneMinutes`.
     static func zoneMinutes(_ hr: [HRSample], restingHR: Double, hrReserve: Double,
-                            durations: [Double]) -> [Double] {
+                            durations: [Double], basis: ZoneBasis = .hrr) -> [Double] {
         var out = [Double](repeating: 0.0, count: 6)
         for i in hr.indices {
-            out[zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve)] += durations[i]
+            out[zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve,
+                           basis: basis)] += durations[i]
         }
         return out
     }
@@ -465,7 +479,10 @@ public enum StrainScorer {
                               // line would usually never appear, because the Today view has already cached
                               // the day at live-HR tick rate before the scoring pass asks.
                               diag: ((String) -> Void)? = nil,
-                              day: String = "") -> Double? {
+                              day: String = "",
+                              // Fork change: what the Edwards cut-offs read (ignored by Banister).
+                              // `.hrr` (default) is the all-day recipe; workouts pass `.hrMax`.
+                              zoneBasis: ZoneBasis = .hrr) -> Double? {
         // Resolve BEFORE the memo key is built, or a Banister request would be cached under Edwards'
         // denominator and a later Edwards request could collide with it.
         let resolvedDenominator = denominator ?? logMapDenominator(method: method, sex: sex)
@@ -476,7 +493,7 @@ public enum StrainScorer {
         let key = StrainKey(
             hr: StreamFingerprint.of(hr, ts: { $0.ts }, quant: { Int($0.bpm) }),
             maxHR: maxHR, restingHR: restingHR, method: method,
-            sexF: sex.lowercased().hasPrefix("f"), denom: resolvedDenominator)
+            sexF: sex.lowercased().hasPrefix("f"), denom: resolvedDenominator, basis: zoneBasis)
         // A diagnostic request BYPASSES the memo, and must. The Today view re-reads this on every
         // live-HR tick with no sink, so by the time the scoring pass asks with one the answer is already
         // cached — and a cache hit never reaches the code that emits, so the line would simply never
@@ -484,11 +501,12 @@ public enum StrainScorer {
         // one. Kotlin has no memo here and always emits; this keeps the two behaving the same.
         guard diag == nil else {
             return strainUncached(hr, maxHR: maxHR, restingHR: restingHR, method: method, sex: sex,
-                                  denominator: resolvedDenominator, diag: diag, day: day)
+                                  denominator: resolvedDenominator, diag: diag, day: day,
+                                  basis: zoneBasis)
         }
         return strainCache.value(key) {
             strainUncached(hr, maxHR: maxHR, restingHR: restingHR, method: method, sex: sex,
-                           denominator: resolvedDenominator, diag: nil, day: day)
+                           denominator: resolvedDenominator, diag: nil, day: day, basis: zoneBasis)
         }
     }
 
@@ -659,13 +677,14 @@ public enum StrainScorer {
     private struct StrainKey: Hashable {
         let hr: StreamFingerprint
         let maxHR: Double?; let restingHR: Double; let method: Method
-        let sexF: Bool; let denom: Double
+        let sexF: Bool; let denom: Double; let basis: ZoneBasis
     }
     private static let strainCache = AnalyticsMemoCache<StrainKey, Double?>(capacity: 48)
 
     private static func strainUncached(_ hr: [HRSample], maxHR: Double?, restingHR: Double,
                                        method: Method, sex: String, denominator: Double,
-                                       diag: ((String) -> Void)? = nil, day: String = "") -> Double? {
+                                       diag: ((String) -> Void)? = nil, day: String = "",
+                                       basis: ZoneBasis = .hrr) -> Double? {
         let effMax = maxHR ?? Double(defaultMaxHR())
         // Enough data to trust the score: a dense stream (≥ minReadings) OR a sparse-but-sustained
         // one spanning ≥ minSpanSeconds with a sample floor (#482 — the 5/MG's ~30 s HR cadence).
@@ -701,7 +720,7 @@ public enum StrainScorer {
                                   floorRatePerMinute: banisterBaselineRatePerMinute(c))
         case .edwards:
             trimp = edwardsTRIMP(hr, restingHR: restingHR, hrReserve: hrReserve,
-                                 durations: durations)
+                                 durations: durations, basis: basis)
         }
         let scored = trimpToStrain(trimp, denominator: denominator)
         // Walked only when a sink is attached. It is a second O(n) pass over the day's samples, and
@@ -711,7 +730,8 @@ public enum StrainScorer {
         // Emitted under BOTH methods on purpose. The zones describe what the day WAS, not how it was
         // scored, and #2438 fits an Edwards-shaped model regardless of the recipe in force.
         let zones: [Double]? = diag == nil ? nil
-            : zoneMinutes(hr, restingHR: restingHR, hrReserve: hrReserve, durations: durations)
+            : zoneMinutes(hr, restingHR: restingHR, hrReserve: hrReserve, durations: durations,
+                          basis: basis)
         diag?(scoreFunnelLine(day: day, hrSamples: hr.count, enough: enoughData, maxHR: effMax,
                               maxHRProvided: maxHR != nil, restingHR: restingHR, method: method,
                               trimp: trimp, strain: scored, zoneMinutes: zones))
