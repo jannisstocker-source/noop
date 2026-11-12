@@ -49,7 +49,7 @@ extension AutoWorkoutDetector {
                              minimumSustainedMinutes: minimumSustainedMinutes)
 
         var lines: [String] = []
-        let floor = (restingBpm ?? defaultRestingHR) + elevatedMarginBPM
+        let floor = elevatedFloor(sorted: hr.sorted { $0.ts < $1.ts }, restingBpm: restingBpm)
         let hasMotion = !(motion?.isEmpty ?? true)
 
         // Inputs the detector saw.

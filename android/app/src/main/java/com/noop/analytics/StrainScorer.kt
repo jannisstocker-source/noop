@@ -283,11 +283,13 @@ object StrainScorer {
     }
 
     /**
-     * Edwards 5-zone weight (0–5) from %HRR (unclamped; extremes agree with
-     * the clamped path at both ends).
+     * Edwards 5-zone weight (0–5) from %HRmax, as Edwards (1993) defines it.
+     * Fork change, twin of the Swift scorer: HRmax is recovered as restingHR + hrReserve.
      */
     fun zoneWeight(bpm: Double, restingHR: Double, hrReserve: Double): Int {
-        val pct = (bpm - restingHR) / hrReserve * 100.0
+        val hrMax = restingHR + hrReserve
+        if (hrMax <= 0.0) return 0
+        val pct = bpm / hrMax * 100.0
         for ((threshold, weight) in edwardsZones) {
             if (pct >= threshold) return weight
         }

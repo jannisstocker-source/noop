@@ -80,6 +80,28 @@ public enum AutoWorkoutDetector {
     /// Resting-HR fallback when the caller has no nightly RHR for the day.
     public static let defaultRestingHR = 60
 
+    // Fork change: the nightly RHR sits far below waking HR (RHR 49 vs a waking median of ~71–78),
+    // so restingHR + 30 is cleared by walking, eating or sitting, and windows bled hours past the
+    // real session. When the series is long enough to know the waking level, the gate is raised to
+    // that level + `awakeMarginBPM`; short series (tests, a fresh install) keep restingHR + 30.
+
+    /// Gate above the waking median HR when a waking baseline is available.
+    public static let awakeMarginBPM = 20
+    /// A sample counts toward the waking baseline when bpm >= restingHR + this (drops sleep).
+    public static let awakeSampleMarginBPM = 10
+    /// The waking baseline is only trusted over at least this much wall-clock HR (6 h).
+    public static let awakeBaselineMinSpanS = 6 * 3600
+    /// ...and at least this many waking samples.
+    public static let awakeBaselineMinSamples = 600
+
+    /// Tail trim: a window that had an intense phase (5-min median >= floor + this) and then runs on
+    /// for more than `tailTrimMinS` below it ends `tailKeepS` after the last intense minute. Cuts the
+    /// raised-but-idle evening that otherwise follows a hard session.
+    public static let intenseMarginBPM = 30
+    public static let tailTrimMinS = 20 * 60
+    public static let tailKeepS = 5 * 60
+    static let tailWindowS = 5 * 60
+
     // MARK: - Inputs
 
     /// One motion-intensity reading aligned to the HR timeline (optional confirmation signal).
@@ -153,7 +175,7 @@ public enum AutoWorkoutDetector {
         let seg = hr.sorted { $0.ts < $1.ts }
         if seg.isEmpty { return [] }
 
-        let floor = (restingBpm ?? defaultRestingHR) + elevatedMarginBPM
+        let floor = elevatedFloor(sorted: seg, restingBpm: restingBpm)
 
         // --- 1 + 2 + 3: grow sustained spans tolerating brief dips ---
         // A span is [spanStart, spanEnd] over ELEVATED-sample timestamps. `dipStart` marks where the
@@ -206,7 +228,8 @@ public enum AutoWorkoutDetector {
         // --- 5 + 6 + 7 ---
         let motionSeries = (motion?.isEmpty ?? true) ? nil : motion
         var results: [DetectedWorkout] = []
-        for (start, end) in merged {
+        for (start, untrimmedEnd) in merged {
+            let end = trimmedEnd(start: start, end: untrimmedEnd, sorted: seg, floor: floor)
             // 6: never re-suggest a window overlapping an already-saved workout.
             if savedSpans.contains(where: { overlaps(start, end, $0.startSec, $0.endSec) }) { continue }
 
@@ -228,6 +251,41 @@ public enum AutoWorkoutDetector {
                                            avgBpm: avg, peakBpm: peak, durationMin: durMin))
         }
         return results
+    }
+
+    /// The elevated gate: restingHR + `elevatedMarginBPM`, raised to the waking median +
+    /// `awakeMarginBPM` when `sorted` (ascending by ts) covers enough waking HR to measure it.
+    public static func elevatedFloor(sorted seg: [(ts: Int, bpm: Int)], restingBpm: Int?) -> Int {
+        let resting = restingBpm ?? defaultRestingHR
+        let base = resting + elevatedMarginBPM
+        guard let first = seg.first, let last = seg.last,
+              last.ts - first.ts >= awakeBaselineMinSpanS else { return base }
+        let awake = seg.map(\.bpm).filter { $0 >= resting + awakeSampleMarginBPM }.sorted()
+        guard awake.count >= awakeBaselineMinSamples else { return base }
+        return max(base, awake[awake.count / 2] + awakeMarginBPM)
+    }
+
+    /// End of a merged window after the tail trim (see `intenseMarginBPM`). Returns `end` unchanged
+    /// when the window never had an intense phase or its tail is short.
+    static func trimmedEnd(start: Int, end: Int, sorted seg: [(ts: Int, bpm: Int)], floor: Int) -> Int {
+        guard end - start > tailTrimMinS else { return end }
+        let window = seg.filter { $0.ts >= start && $0.ts <= end }
+        var lastIntense: Int? = nil
+        var lo = 0
+        var t = start
+        while t <= end {
+            // Samples in (t - tailWindowS, t]; `lo` only moves forward because `t` does.
+            while lo < window.count, window[lo].ts <= t - tailWindowS { lo += 1 }
+            var hi = lo
+            while hi < window.count, window[hi].ts <= t { hi += 1 }
+            if hi - lo >= 30 {
+                let bpms = window[lo..<hi].map(\.bpm).sorted()
+                if bpms[bpms.count / 2] >= floor + intenseMarginBPM { lastIntense = t }
+            }
+            t += 60
+        }
+        guard let li = lastIntense, end - li > tailTrimMinS else { return end }
+        return li + tailKeepS
     }
 
     /// Two closed [aStart, aEnd] / [bStart, bEnd] intervals overlap (touching endpoints count).

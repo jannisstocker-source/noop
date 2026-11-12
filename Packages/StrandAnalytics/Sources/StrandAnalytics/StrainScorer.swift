@@ -17,15 +17,12 @@ import WhoopProtocol
 //   1. Heart-Rate Reserve (Karvonen): HRR = HRmax − RHR.
 //   2. Per-sample intensity as %HRR = (HR − RHR) / HRR × 100, clamped 0..100.
 //   3. TRIMP accumulated over the window:
-//        a. Edwards-STYLE 5-zone summation (default): sample contributes its zone weight
-//           (1..5 at 50/60/70/80/90 %HRR cut-offs) × duration.
-//           STYLE, not Edwards: Edwards (1993) defines its five zones on %HRmax, and these cut-offs
-//           are read off %HRR (#2835, @yashkgp). With HRmax 190 and RHR 50, 133 bpm is 70 %HRmax and
-//           so zone 3 by the source, against 59 %HRR and zone 1 here. The %HRR reading is deliberate
-//           and stays: it is the quantity this whole file is built on, every other stage of the
-//           pipeline is Karvonen reserve, and re-cutting the zones on %HRmax would move every user's
-//           Effort number, which is a scoring change needing its own evidence rather than a citation
-//           repair. What was wrong was calling the result Edwards without qualification.
+//        a. Edwards 5-zone summation (default): sample contributes its zone weight
+//           (1..5 at 50/60/70/80/90 %HRmax cut-offs) × duration.
+//           Fork change: upstream reads these cut-offs off %HRR (#2835). That leaves strength
+//           training, which sits around 55–70 %HRmax, almost entirely below zone 1, so a normal gym
+//           session scored ~5–25 of 100. This fork uses Edwards' own %HRmax zones instead, which
+//           lifts strength sessions while moving cardio sessions only a few points.
 //        b. Banister exponential: sample contributes duration × x × 0.64 × e^(b·x).
 //   4. Logarithmic compression onto [0, 100]:
 //        strain = 100 × ln(TRIMP + 1) / ln(D)
@@ -33,8 +30,7 @@ import WhoopProtocol
 //      sex-independent 7200 ceiling), Banister its own sex-dependent ceiling + 1. See
 //      `logMapDenominator(method:sex:)` — reusing one for the other silently rescales the axis (#1545).
 //
-// References: Karvonen 1957 (%HRR); Edwards 1993 (5-zone TRIMP, defined on %HRmax; see the
-// Edwards-STYLE note above for why these cut-offs read %HRR instead); Banister 1991
+// References: Karvonen 1957 (%HRR); Edwards 1993 (5-zone TRIMP, defined on %HRmax); Banister 1991
 // (exponential TRIMP; Morton/Fitz-Clarke/Banister 1990 publish 0.64·e^(1.92x) for men and
 // 0.86·e^(1.67x) for women, and both halves of that pair are sex-selected together, see
 // `BanisterCoefficients`); Tanaka 2001 (HRmax = 208 − 0.7×age).
@@ -199,10 +195,9 @@ public enum StrainScorer {
              : BanisterCoefficients(scale: banisterScale, b: banisterBMen)
     }
 
-    /// Edwards-STYLE zone cut-offs as (%HRR threshold, weight), highest-first.
+    /// Edwards zone cut-offs as (%HRmax threshold, weight), highest-first.
     ///
-    /// The thresholds are %HRR, where Edwards (1993) defines its zones on %HRmax (#2835). Deliberate,
-    /// and documented at the pipeline note in this file's header rather than restated here.
+    /// Fork change: read on %HRmax as in Edwards (1993), not on %HRR as upstream (#2835).
     static let edwardsZones: [(threshold: Double, weight: Int)] = [
         (90.0, 5), (80.0, 4), (70.0, 3), (60.0, 2), (50.0, 1),
     ]
@@ -255,10 +250,15 @@ public enum StrainScorer {
         return pct
     }
 
-    /// Edwards 5-zone weight (0–5) from %HRR (unclamped; extremes agree with
-    /// the clamped path at both ends).
+    /// Edwards 5-zone weight (0–5) from %HRmax, as Edwards (1993) defines it.
+    ///
+    /// Fork change: the upstream cut-offs read %HRR, which puts zone 1 at ~121 bpm for RHR 49 /
+    /// HRmax 193, so a strength session averaging ~108 bpm scored almost no TRIMP. HRmax is
+    /// recovered as `restingHR + hrReserve`, so every caller keeps its signature.
     static func zoneWeight(_ bpm: Double, restingHR: Double, hrReserve: Double) -> Int {
-        let pct = (bpm - restingHR) / hrReserve * 100.0
+        let hrMax = restingHR + hrReserve
+        guard hrMax > 0 else { return 0 }
+        let pct = bpm / hrMax * 100.0
         for (threshold, weight) in edwardsZones where pct >= threshold { return weight }
         return 0
     }
