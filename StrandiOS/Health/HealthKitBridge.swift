@@ -1752,7 +1752,8 @@ final class HealthKitBridge: ObservableObject {
               last.ts - first.ts >= effortMinimumSpanSeconds else { return nil }
         return StrainScorer.strain(samples, maxHR: profile.hrMax,
                                    method: PuffinExperiment.effortMethod,
-                                   sex: profile.sex)
+                                   sex: profile.sex,
+                                   zoneBasis: .hrMax)  // fork: workouts score on %HRmax
     }
 
     /// HealthKit has no direct step-count property on HKWorkout; query step samples for its time window.

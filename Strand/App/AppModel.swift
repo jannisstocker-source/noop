@@ -1035,7 +1035,8 @@ final class AppModel: ObservableObject {
         let strain = samples.count >= 2
             ? StrainScorer.strain(samples, maxHR: Double(profile.hrMax),
                                   restingHR: restingHR,
-                                  method: PuffinExperiment.effortMethod, sex: profile.sex) : nil
+                                  method: PuffinExperiment.effortMethod, sex: profile.sex,
+                                  zoneBasis: .hrMax) : nil  // fork: workouts score on %HRmax
         // Estimate calories from the captured HR window (same Keytel/Harris–Benedict model the
         // auto-detector uses) so a manual session shows energy too, not just duration/strain. (#117)
         let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
@@ -1094,7 +1095,8 @@ final class AppModel: ObservableObject {
         w.peakHr = max(w.peakHr, hr)
         w.avgHr = Int((Double(w.samples.map(\.bpm).reduce(0, +)) / Double(w.samples.count)).rounded())
         w.liveStrain = StrainScorer.strain(w.samples, maxHR: Double(profile.hrMax),
-                                              method: PuffinExperiment.effortMethod, sex: profile.sex) ?? 0
+                                              method: PuffinExperiment.effortMethod, sex: profile.sex,
+                                              zoneBasis: .hrMax) ?? 0  // fork: workouts score on %HRmax
         activeWorkout = w
         // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
         persistActiveWorkout()

@@ -2861,6 +2861,10 @@ final class Repository: ObservableObject {
         // #961: capture the injected profile ONCE (a Sendable scalar pair) so each child task can compute a
         // backfill strain off the main actor. nil ⇒ no fill, and the strain slot always comes back nil.
         let strainProfile = self.strainProfile
+        // Fork change: workouts are now scored on %HRmax, so recompute the last 30 days of strap-native rows
+        // (display-only, like the rest of this function) instead of only filling a nil Effort. Older rows
+        // keep their stored value, which bounds the extra trace reads.
+        let recentCutoff = Int(Date().timeIntervalSince1970) - 30 * 86_400
         var reduced: [Int: (avg: Int, peak: Int, strain: Double?)] = [:]
         for chunkStart in stride(from: 0, to: eligibleIndices.count, by: readChunk) {
             let chunk = eligibleIndices[chunkStart..<min(chunkStart + readChunk, eligibleIndices.count)]
@@ -2873,7 +2877,8 @@ final class Repository: ObservableObject {
                     // own. Resolve this on the main actor (WorkoutSource.classify) and capture the plain Bool,
                     // so the child task crosses only Sendable scalars.
                     let cls = WorkoutSource.classify(rows[idx].source)
-                    let wantStrain = (cls == .manual || cls == .detected) && rows[idx].strain == nil
+                    let wantStrain = (cls == .manual || cls == .detected)
+                        && (rows[idx].strain == nil || rows[idx].startTs >= recentCutoff)
                     // #510: read HR under the workout's OWN recording strap, not a single active id. A detected
                     // row's `source` IS its computed strap id ("<base>-noop"), so a bout auto-detected on a 2nd
                     // WHOOP reads "<base>" instead of the active strap's empty window. Resolved on the main actor;
@@ -2905,7 +2910,8 @@ final class Repository: ObservableObject {
                                                                       from: startTs, to: endTs,
                                                                       limit: 8000)) ?? []
                             strain = StrainScorer.strain(samples, maxHR: p.hrMax,
-                                                method: PuffinExperiment.effortMethod, sex: p.sex)
+                                                method: PuffinExperiment.effortMethod, sex: p.sex,
+                                                zoneBasis: .hrMax)  // fork: workouts score on %HRmax
                         } else {
                             strain = nil
                         }
@@ -2929,7 +2935,8 @@ final class Repository: ObservableObject {
             // #961: FILL a nil Effort from the recomputed strain (never override a stored one). Display-only,
             // like the avg/max reconcile , the workout-PK upsert would wipe it, and the backend rescore
             // persists the durable value on the next analyze tick.
-            let newStrain = row.strain ?? r.strain
+            // Fork change: a recent strap-native row takes the %HRmax recompute over its stored value.
+            let newStrain = (strapNative && row.startTs >= recentCutoff) ? (r.strain ?? row.strain) : (row.strain ?? r.strain)
             return WorkoutRow(startTs: row.startTs, endTs: row.endTs, sport: row.sport,
                               source: row.source, durationS: row.durationS, energyKcal: row.energyKcal,
                               avgHr: r.avg, maxHr: newMax, strain: newStrain, distanceM: row.distanceM,
